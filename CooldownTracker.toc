@@ -1,0 +1,8 @@
+## Interface: 11200
+## Title: CooldownTracker
+## Version: 1.0
+## Author: Bard
+## Notes: A simple, customizable cooldown tracker.
+## SavedVariablesPerCharacter: CooldownTrackerDB
+
+CooldownTracker.lua
