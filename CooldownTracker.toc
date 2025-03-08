@@ -1,8 +1,12 @@
 ## Interface: 11200
 ## Title: CooldownTracker
-## Version: 1.0
+## Notes: Tracks cooldowns for spells and items
+## SavedVariables: CooldownTrackerDB, CooldownTrackerSettings
 ## Author: Abstractz
-## Notes: A simple, customizable cooldown tracker.
-## SavedVariablesPerCharacter: CooldownTrackerDB
+## Version: 1.0
 
+# Load settings file first
+CooldownTrackerSettings.lua
+
+# Load main addon
 CooldownTracker.lua
