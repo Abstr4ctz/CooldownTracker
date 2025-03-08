@@ -1,6 +1,8 @@
 # CooldownTracker
 ![WoW 2025-03-07 15-34-05-451](https://github.com/user-attachments/assets/ecd3afeb-6486-45ca-ba3b-45438e9a8afa)
 
+### ⚠️ Edit CooldownTrackedSettings.lua to add and remove tracked spells and items! ⚠️
+
 ## Description
 
 **CooldownTracker** is a lightweight addon for World of Warcraft 1.12 (Vanilla) that helps you track the cooldowns of your important spells and items. It displays simple, movable icons on your screen that visually represent when your abilities are ready to use again. This addon is designed to be easy to use and configure, allowing you to keep track of vital cooldowns without cluttering your interface.
@@ -9,7 +11,7 @@
 
 *   **Spell Cooldown Tracking:** Automatically tracks cooldowns for a predefined list of spells.
 *   **Item Cooldown Tracking:**  Tracks cooldowns for specified items, like grenades, potions, and consumables.
-*   **Easy to Configure:**  Add or remove spells and items directly in the `CooldownTracker.lua` file.
+*   **Easy to Configure:**  Add or remove spells and items directly in the `CooldownTrackedSettings.lua` file.
 *   **Performance Optimized:** Designed to be lightweight and have minimal impact on game performance, suitable for Vanilla WoW.
 
 ## Usage
@@ -24,20 +26,20 @@ Once installed and loaded, CooldownTracker will automatically start tracking the
 
 ## Adding Your Own Spells and Items
 
-You can easily customize CooldownTracker to track additional spells and items by editing the `CooldownTracker.lua` file.
+You can easily customize CooldownTracker to track additional spells and items by editing the `CooldownTrackedSettings.lua` file.
 
 **Important:**
 
-*   **Make sure World of Warcraft is closed before editing the `CooldownTracker.lua` file.**
+*   **Make sure World of Warcraft is closed before editing the `CooldownTrackedSettings.lua` file.**
 *   **Use a plain text editor** like Notepad, or a code editor like Notepad++. **Do not use programs like Microsoft Word**, as they can add formatting that will break the addon.
 
-**Steps to Edit `CooldownTracker.lua`:**
+**Steps to Edit `CooldownTrackedSettings.lua`:**
 
-1.  **Locate the `CooldownTracker.lua` file:**
+1.  **Locate the `CooldownTrackedSettings.lua` file:**
     *   Navigate to your World of Warcraft directory, then `Interface\AddOns\CooldownTracker`.
     *   Find the file named `CooldownTracker.lua`.
 
-2.  **Open `CooldownTracker.lua` with a text editor.**
+2.  **Open `CooldownTrackedSettings.lua` with a text editor.**
 
 3.  **Adding Spells:**
     *   Scroll down in the file until you find the section that looks like this:
@@ -112,7 +114,7 @@ You can easily customize CooldownTracker to track additional spells and items by
     },
     ```
 
-5.  **Save the `CooldownTracker.lua` file.**  Make sure you save it as a `.lua` file and not as `.txt` or any other format.
+5.  **Save the `CooldownTrackedSettings.lua` file.**  Make sure you save it as a `.lua` file and not as `.txt` or any other format.
 
 6.  **Launch World of Warcraft.** The addon will now track the newly added spells and items. If you added items, ensure you have them in your bags for the addon to detect them.
 
@@ -144,6 +146,6 @@ You can use the following slash commands in the game chat to control CooldownTra
 
 *   If you have trouble getting the addon to recognize your changes, try completely exiting World of Warcraft and restarting it. Sometimes a simple `/reloadui` command in-game is not enough after modifying addon files.
 *   Double-check that you have entered the spell and item names correctly and that the icon paths (if you added them) are also correct. Typos are a common cause of issues.
-*   If you use a default question mark icon for an item and later find the correct icon path, you can edit the `CooldownTracker.lua` file again and replace the question mark icon path with the correct one.
+*   If you use a default question mark icon for an item and later find the correct icon path, you can edit the `CooldownTrackedSettings.lua` file again and replace the question mark icon path with the correct one.
 
 Enjoy using CooldownTracker to keep track of your important cooldowns in World of Warcraft 1.12!
