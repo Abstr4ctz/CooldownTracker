@@ -1,8 +1,109 @@
--- CooldownTracker.lua
+--[[
+    CooldownTracker.lua
+    
+    A World of Warcraft (1.12) addon for tracking cooldowns of spells and items.
+    
+    Features:
+    - Tracks spell cooldowns
+    - Tracks item cooldowns
+    - Configurable icon size, transparency, and positioning
+    - Performance optimizations
+    - Drag-and-drop positioning for each icon
+    
+    Version: 1.0
+    Author: Abstractz
+    Last updated: 2025-03-15
+]]
+
+-- Addon namespace
 local addonName = "CooldownTracker"
 
--- Manual table copy function
+--- **************************************************************************
+-- CONSTANTS AND DEFAULT VALUES
+-- **************************************************************************
+
+-- Default database structure
+local defaultDB = {
+    config = {
+        locked = true,                  -- Default to locked
+        iconAnchor = "CENTER",          -- Default anchor point
+        iconX = 0,                      -- Default X position
+        iconY = 0,                      -- Default Y position
+        iconSpacing = 30,               -- Default spacing between icons
+        iconSize = 36,                  -- Default icon size
+        iconAlpha = 1.0,                -- Default alpha/transparency
+        cooldownScale = (1 / 32) * 36,  -- Computed scale based on icon size
+        updateInterval = 0.1,           -- Update interval in seconds
+    },
+    
+    -- Stores spell info found in spellbook
+    spellCache = {},
+    
+    -- Stores individual icon sizes
+    individualIconSizes = {},
+    
+    -- Stores icon positions
+    iconPositions = {}
+}
+
+-- Pre-allocate texture coordinates to avoid creating tables in CreateTrackingFrame
+local TEXTURE_COORDINATES = {0.08, 0.92, 0.08, 0.92}
+
+-- Constants for icon size limits
+local MIN_ICON_SIZE = 10
+local MAX_ICON_SIZE = 100
+
+-- Constants for alpha limits
+local MIN_ICON_ALPHA = 0.1
+local MAX_ICON_ALPHA = 1.0
+
+-- **************************************************************************
+-- GLOBAL TRACKING VARIABLES
+-- **************************************************************************
+
+-- Main addon frame
+local frame = CreateFrame("Frame")
+
+-- Global tracking tables
+local trackingFrames = {}      -- Combined table to track all frames (spells and items)
+local needsUpdate = false      -- Flag to prevent unnecessary updates
+local playerInCombat = false   -- Track player combat state
+
+-- Item tracking cache
+local itemMissingFromBags = {} -- Track which items are missing from bags
+local itemLocations = {}       -- Quick lookup for item locations
+local trackedItemLookup = {}   -- Quick lookup for tracked items
+local itemNameCache = {}       -- Item name extraction cache to avoid repeated string operations
+
+-- Performance tracking
+local trackedSpellCount = 0
+local trackedItemCount = 0
+
+-- Time tracking
+local lastUpdate = 0
+local currentTime = 0
+local bagUpdateThrottle = 0
+local bagUpdatePending = false
+
+-- Message colors
+local COLOR_SUCCESS = {r = 0, g = 1, b = 0}
+local COLOR_ERROR = {r = 1, g = 0, b = 0}
+local COLOR_WARNING = {r = 1, g = 0.5, b = 0}
+local COLOR_INFO = {r = 0, g = 1, b = 1}
+local COLOR_TITLE = {r = 1, g = 1, b = 0}
+local COLOR_HELP = {r = 1, g = 1, b = 1}
+
+-- **************************************************************************
+-- UTILITY FUNCTIONS
+-- **************************************************************************
+
+---
+-- Deep copies a table
+-- @param original The table to copy
+-- @return A new table with all values copied
 local function CopyTable(original)
+    if type(original) ~= "table" then return original end
+    
     local copy = {}
     for k, v in pairs(original) do
         if type(v) == "table" then
@@ -14,8 +115,12 @@ local function CopyTable(original)
     return copy
 end
 
--- Manual string split function for 1.12 - Optimized
-local function CustomStrSplit(inputstr, sep)
+---
+-- Splits a string by a separator
+-- @param inputstr The string to split
+-- @param sep The separator (default: space)
+-- @return Multiple return values, one for each part
+local function SplitString(inputstr, sep)
     if not inputstr then return nil end
     sep = sep or " "
     local t = {}
@@ -27,60 +132,68 @@ local function CustomStrSplit(inputstr, sep)
     return unpack(t)
 end
 
--- Define a function to wipe tables for vanilla WoW
-local function wipe(t)
+---
+-- Clears all keys from a table
+-- @param t The table to clear
+-- @return The cleared table
+local function WipeTable(t)
     for k in pairs(t) do
         t[k] = nil
     end
     return t
 end
 
--- Create default database structure
-local defaultDB = {
-    config = {
-        locked = true,  -- Default to locked
-        iconAnchor = "CENTER",
-        iconX = 0,
-        iconY = 0,
-        iconSpacing = 30,
-        iconSize = 36,  -- Default icon size
-        iconAlpha = 1.0,  -- Alpha/transparency option
-        cooldownScale = (1 / 32) * 36,  -- Compute scale based on icon size
-        updateInterval = 0.1,  -- Configurable update interval
-    },
+---
+-- Extracts item name from item link with caching
+-- @param link The item link
+-- @return The item name or nil if not found
+local function GetItemNameFromLink(link)
+    if not link then return nil end
     
-    -- This will store spell info found in spellbook
-    spellCache = {}
-}
-
--- Global tracking tables
-local trackingFrames = {} -- Combined table to track all frames (spells and items)
-local needsUpdate = false -- Flag to prevent unnecessary updates
-local frame = CreateFrame("Frame") -- Our main addon frame
-local playerInCombat = false -- Track player combat state
-
--- Item tracking cache
-local itemCache = {} -- Stores bag and slot info for tracked items
-local itemMissingFromBags = {} -- Track which items are missing from bags
-local itemLocations = {} -- Quick lookup for item locations
-
--- Item name extraction cache to avoid repeated string operations
-local itemNameCache = {}
-
--- Performance tracking
-local trackedSpellCount = 0
-local trackedItemCount = 0
-
--- Cache frequently used values
-local function CacheFrequentValues()
-    CooldownTrackerDB.config.cooldownScale = (1 / 32) * CooldownTrackerDB.config.iconSize
+    -- Check cache first
+    if itemNameCache[link] then
+        return itemNameCache[link]
+    end
+    
+    local start, stop = string.find(link, "%[.+%]")
+    if start and stop then
+        local name = string.sub(link, start + 1, stop - 1)
+        itemNameCache[link] = name
+        return name
+    end
+    return nil
 end
 
--- Initialize database with default values if needed
-local function InitDB()
+---
+-- Updates cached values that are frequently used
+local function UpdateCachedValues()
+    if CooldownTrackerDB and CooldownTrackerDB.config then
+        CooldownTrackerDB.config.cooldownScale = (1 / 32) * CooldownTrackerDB.config.iconSize
+    end
+end
+
+---
+-- Prints a message to the chat frame with color
+-- @param message The message to print
+-- @param color Table with r, g, b values
+local function PrintMessage(message, color)
+    if not message then return end
+    if not color then color = COLOR_INFO end
+    
+    DEFAULT_CHAT_FRAME:AddMessage(addonName..": "..message, color.r, color.g, color.b)
+end
+
+-- **************************************************************************
+-- DATABASE MANAGEMENT
+-- **************************************************************************
+
+---
+-- Initializes the database with default values if needed
+-- Ensures all required fields exist in the database
+local function InitializeDatabase()
+    -- Create new database if it doesn't exist
     if not CooldownTrackerDB then
         CooldownTrackerDB = CopyTable(defaultDB)
-        CooldownTrackerDB.iconPositions = {} -- Add positions table
     else
         -- Make sure all default fields exist
         for k, v in pairs(defaultDB) do
@@ -100,34 +213,48 @@ local function InitDB()
         if not CooldownTrackerDB.iconPositions then
             CooldownTrackerDB.iconPositions = {}
         end
+        
+        -- Ensure we have individual icon sizes table
+        if not CooldownTrackerDB.individualIconSizes then
+            CooldownTrackerDB.individualIconSizes = {}
+        end
     end
     
     -- Cache frequently used values
-    CacheFrequentValues()
+    UpdateCachedValues()
 end
 
--- Function to find spell info in spellbook (only run on initialization)
--- Optimized to use a more efficient tab processing method
+-- **************************************************************************
+-- SPELL MANAGEMENT
+-- **************************************************************************
+
+---
+-- Finds spell information in the spellbook
+-- @param spellName The name of the spell to find
+-- @return Table with texture and offset, or nil if not found
 local function FindSpellInfo(spellName)
+    if not spellName or spellName == "" then return nil end
+    
     local lowerSpellName = string.lower(spellName)
     
     -- Iterate through spellbook tabs
     for tab = 1, GetNumSpellTabs() do
         local _, _, offset, numSpells = GetSpellTabInfo(tab)
-        
-        -- Iterate through spells in this tab
-        for i = 1, numSpells do
-            local bookSpellName = GetSpellName(offset + i, BOOKTYPE_SPELL)
-            
-            -- Check if this is the spell we're looking for (using lower case for both)
-            if bookSpellName and string.lower(bookSpellName) == lowerSpellName then
-                local texture = GetSpellTexture(offset + i, BOOKTYPE_SPELL)
+        if offset and numSpells then
+            -- Iterate through spells in this tab
+            for i = 1, numSpells do
+                local bookSpellName = GetSpellName(offset + i, BOOKTYPE_SPELL)
                 
-                -- Return the spell info
-                return {
-                    texture = texture,
-                    offset = offset + i
-                }
+                -- Check if this is the spell we're looking for (using lower case for both)
+                if bookSpellName and string.lower(bookSpellName) == lowerSpellName then
+                    local texture = GetSpellTexture(offset + i, BOOKTYPE_SPELL)
+                    
+                    -- Return the spell info
+                    return {
+                        texture = texture,
+                        offset = offset + i
+                    }
+                end
             end
         end
     end
@@ -135,26 +262,219 @@ local function FindSpellInfo(spellName)
     return nil
 end
 
--- Pre-allocate texture coordinates to avoid creating tables in CreateTrackingFrame
-local texCoord = {0.08, 0.92, 0.08, 0.92}
+-- **************************************************************************
+-- ITEM MANAGEMENT
+-- **************************************************************************
 
--- Function to create a tracking frame (used for both spells and items)
+---
+-- Initializes the lookup table for tracked items
+local function InitializeTrackedItemLookup()
+    WipeTable(trackedItemLookup)
+    local _, itemsToTrack = GetCooldownTrackerSettings()
+    
+    for itemName in pairs(itemsToTrack) do
+        trackedItemLookup[itemName] = true
+    end
+end
+
+---
+-- Updates the visual state of an item based on whether it's missing from bags
+-- @param itemName The name of the item
+-- @param isMissing Boolean indicating if the item is missing
+local function UpdateItemState(itemName, isMissing)
+    local frameData = trackingFrames[itemName]
+    if not frameData then return end
+    
+    if isMissing then
+        if not frameData.missingFromBags then
+            frameData.missingFromBags = true
+            frameData.icon:SetAlpha(0.28)  -- Set alpha to 28%
+        end
+    else
+        if frameData.missingFromBags then
+            frameData.missingFromBags = false
+            frameData.icon:SetAlpha(frameData.originalAlpha) -- Restore original alpha
+        end
+    end
+end
+
+---
+-- Updates the cooldown display for a specific item
+-- @param itemName The name of the item
+-- @param location Table with bag and slot information
+local function UpdateItemCooldown(itemName, location)
+    local frameData = trackingFrames[itemName]
+    if not frameData or not location then return end
+    
+    -- Get cooldown info
+    local startTime, duration, enable = GetContainerItemCooldown(location.bag, location.slot)
+    
+    -- Only update if cooldown has changed
+    if startTime and duration and (frameData.startTime ~= startTime or frameData.duration ~= duration) then
+        frameData.startTime = startTime
+        frameData.duration = duration
+        frameData.lastUpdate = GetTime()
+        
+        if startTime > 0 and duration > 0 then
+            CooldownFrame_SetTimer(frameData.cooldown, startTime, duration, enable)
+            frameData.active = true
+        else
+            -- Clear cooldown if it's done
+            CooldownFrame_SetTimer(frameData.cooldown, 0, 0, 0)
+            frameData.active = false
+        end
+    end
+end
+
+---
+-- Verifies tracked items during combat (optimized for combat)
+-- Only checks existing locations rather than scanning all bags
+local function VerifyTrackedItemsInCombat()
+    for itemName, locations in pairs(itemLocations) do
+        if locations and table.getn(locations) > 0 then
+            local validLocations = {}
+            local stillValid = false
+            
+            -- Check each known location
+            for _, location in ipairs(locations) do
+                local link = GetContainerItemLink(location.bag, location.slot)
+                local nameInSlot = link and GetItemNameFromLink(link)
+                
+                if nameInSlot and nameInSlot == itemName then
+                    table.insert(validLocations, location)
+                    stillValid = true
+                end
+            end
+            
+            -- Update the locations table with only valid locations
+            itemLocations[itemName] = validLocations
+            
+            -- If no valid locations remain, mark as missing
+            if not stillValid then
+                itemMissingFromBags[itemName] = true
+                UpdateItemState(itemName, true)
+            end
+        end
+    end
+end
+
+---
+-- Performs a full scan of all bags to find tracked items
+local function ScanBagsForItems()
+    -- Clear current item location cache but preserve missing state
+    local previouslyMissing = CopyTable(itemMissingFromBags)
+    WipeTable(itemLocations)
+    WipeTable(itemMissingFromBags)
+    
+    -- Scan all bags
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag)
+        
+        for slot = 1, numSlots do
+            local itemLink = GetContainerItemLink(bag, slot)
+            
+            if itemLink then
+                -- Extract item name from link
+                local itemName = GetItemNameFromLink(itemLink)
+                
+                -- Check if this is an item we're tracking
+                if itemName and trackedItemLookup[itemName] then
+                    -- Track location
+                    if not itemLocations[itemName] then
+                        itemLocations[itemName] = {}
+                    end
+                    
+                    local location = {bag = bag, slot = slot}
+                    table.insert(itemLocations[itemName], location)
+                    
+                    -- If not in combat, update cooldown for newly found items
+                    if not playerInCombat and previouslyMissing[itemName] then
+                        UpdateItemCooldown(itemName, location)
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Update missing item states
+    for itemName in pairs(trackedItemLookup) do
+        local isMissing = not itemLocations[itemName] or table.getn(itemLocations[itemName]) == 0
+        itemMissingFromBags[itemName] = isMissing
+        UpdateItemState(itemName, isMissing)
+    end
+    
+    -- Force a full cooldown update after scanning if not in combat
+    if not playerInCombat then
+        needsUpdate = true
+    end
+end
+
+---
+-- Updates cooldowns for all tracked items with known locations
+local function UpdateItemCooldowns()
+    for itemName, locations in pairs(itemLocations) do
+        if locations and table.getn(locations) > 0 then
+            -- Take the first instance for cooldown info (all instances of same item share cooldown)
+            local location = locations[1]
+            UpdateItemCooldown(itemName, location)
+        end
+    end
+end
+
+-- **************************************************************************
+-- UI AND FRAME CREATION
+-- **************************************************************************
+
+-- Function to get icon size for a specific frame
+local function GetIconSize(name)
+    -- Check if this icon has an individual size set
+    if CooldownTrackerDB.individualIconSizes and CooldownTrackerDB.individualIconSizes[name] then
+        return CooldownTrackerDB.individualIconSizes[name]
+    end
+    
+    -- Otherwise return the global size
+    return CooldownTrackerDB.config.iconSize
+end
+
+-- Calculate cooldown scale for a specific icon size
+local function CalculateCooldownScale(iconSize)
+    return (1 / 32) * iconSize
+end
+
+---
+-- Creates a tracking frame for a spell or item
+-- @param name The name of the spell or item
+-- @param texture The texture to display
+-- @param iconCount The position index for default positioning
+-- @param isSpell Boolean indicating if this is a spell (true) or item (false)
+-- @param spellOffset The spell offset in the spellbook (for spells only)
+-- @return Table containing the frame data
 local function CreateTrackingFrame(name, texture, iconCount, isSpell, spellOffset)
+    if not name or not texture then
+        PrintMessage("Cannot create tracking frame: missing name or texture", COLOR_ERROR)
+        return nil
+    end
+    
     local config = CooldownTrackerDB.config
+    
+    -- Get size for this specific icon
+    local iconSize = GetIconSize(name)
 
     -- Create main frame
     local frame = CreateFrame("Frame", addonName.."_"..name, UIParent)
-    frame:SetWidth(config.iconSize)
-    frame:SetHeight(config.iconSize)
+    frame:SetWidth(iconSize)
+    frame:SetHeight(iconSize)
+    
+    -- Add marker for CooldownTrackerTimers module
+    frame.cooldownTrackerData = true
     
     -- Use saved position if available
     if CooldownTrackerDB.iconPositions and CooldownTrackerDB.iconPositions[name] then
         local pos = CooldownTrackerDB.iconPositions[name]
         frame:SetPoint(pos.anchor, UIParent, pos.anchor, pos.x, pos.y)
     else
-        -- Default position
-        frame:SetPoint(config.iconAnchor, UIParent, config.iconAnchor,
-            config.iconX + ((iconCount-1) * config.iconSpacing), config.iconY)
+        -- Default position - all icons stacked at the same point
+        frame:SetPoint(config.iconAnchor, UIParent, config.iconAnchor, config.iconX, config.iconY)
     end
 
     -- Set alpha
@@ -171,14 +491,15 @@ local function CreateTrackingFrame(name, texture, iconCount, isSpell, spellOffse
     icon:SetAllPoints(frame)
 
     -- Apply texture coordinate zoom using pre-allocated table
-    icon:SetTexCoord(unpack(texCoord))
+    icon:SetTexCoord(unpack(TEXTURE_COORDINATES))
 
     -- Cooldown frame with enhanced positioning and scaling
     local cooldown = CreateFrame("Model", nil, frame, "CooldownFrameTemplate")
     cooldown:SetAllPoints(frame)
 
-    -- Compute scale based on icon size
-    cooldown:SetScale(config.cooldownScale)
+    -- Compute scale based on icon's specific size
+    local cooldownScale = CalculateCooldownScale(iconSize)
+    cooldown:SetScale(cooldownScale)
 
     -- Enhanced cooldown frame positioning
     cooldown:ClearAllPoints()
@@ -229,252 +550,13 @@ local function CreateTrackingFrame(name, texture, iconCount, isSpell, spellOffse
     }
 end
 
--- Function to extract item name from link - optimized with caching
-local function GetItemNameFromLink(link)
-    if not link then return nil end
-    
-    -- Check cache first
-    if itemNameCache[link] then
-        return itemNameCache[link]
-    end
-    
-    local start, stop = string.find(link, "%[.+%]")
-    if start and stop then
-        local name = string.sub(link, start + 1, stop - 1)
-        itemNameCache[link] = name
-        return name
-    end
-    return nil
-end
+-- **************************************************************************
+-- COOLDOWN TRACKING FUNCTIONS
+-- **************************************************************************
 
--- Initialize item tracking frames
-local function InitializeItemFrames(startIconCount)
-    local iconCount = startIconCount
-    
-    -- Get the itemsToTrack table from the settings file
-    local _, itemsToTrack = GetCooldownTrackerSettings()
-    
-    -- Create frames for items with icons
-    for itemName, iconTexture in pairs(itemsToTrack) do
-        if not trackingFrames[itemName] then
-            iconCount = iconCount + 1
-            
-            -- Create tracking frame for this item
-            trackingFrames[itemName] = CreateTrackingFrame(
-                itemName,
-                iconTexture,
-                iconCount,
-                false,  -- Not a spell
-                nil     -- No spell offset
-            )
-            
-            trackedItemCount = trackedItemCount + 1
-        end
-    end
-    
-    return iconCount
-end
-
--- IMPROVED: Consolidated function to handle item states (missing/found)
-local function UpdateItemState(itemName, isMissing)
-    local frameData = trackingFrames[itemName]
-    if not frameData then return end
-    
-    if isMissing then
-        if not frameData.missingFromBags then
-            frameData.missingFromBags = true
-            frameData.icon:SetAlpha(0.28)  -- Set alpha to 28%
-        end
-    else
-        if frameData.missingFromBags then
-            frameData.missingFromBags = false
-            frameData.icon:SetAlpha(frameData.originalAlpha) -- Restore original alpha
-        end
-    end
-end
-
--- IMPROVED: Function to update item cooldown
-local function UpdateItemCooldown(itemName, location)
-    local frameData = trackingFrames[itemName]
-    if not frameData then return end
-    
-    -- Get cooldown info
-    local startTime, duration, enable = GetContainerItemCooldown(location.bag, location.slot)
-    
-    -- Only update if cooldown has changed
-    if startTime and duration and (frameData.startTime ~= startTime or frameData.duration ~= duration) then
-        frameData.startTime = startTime
-        frameData.duration = duration
-        frameData.lastUpdate = GetTime()
-        
-        if startTime > 0 and duration > 0 then
-            CooldownFrame_SetTimer(frameData.cooldown, startTime, duration, enable)
-            frameData.active = true
-        else
-            -- Clear cooldown if it's done
-            CooldownFrame_SetTimer(frameData.cooldown, 0, 0, 0)
-            frameData.active = false
-        end
-    end
-end
-
--- IMPROVED: Create a lookup table of tracked items
-local trackedItemLookup = {}
-
--- IMPROVED: Function to initialize tracked item lookup
-local function InitializeTrackedItemLookup()
-    wipe(trackedItemLookup)
-    local _, itemsToTrack = GetCooldownTrackerSettings()
-    
-    for itemName in pairs(itemsToTrack) do
-        trackedItemLookup[itemName] = true
-    end
-end
-
--- IMPROVED: Optimized bag scanning - handles both combat and non-combat situations
-local function ScanBagsForItems()
-    -- Clear current item location cache but preserve missing state
-    local previouslyMissing = CopyTable(itemMissingFromBags)
-    wipe(itemLocations)
-    wipe(itemMissingFromBags)
-    
-    -- Scan all bags
-    for bag = 0, 4 do
-        local numSlots = GetContainerNumSlots(bag)
-        
-        for slot = 1, numSlots do
-            local itemLink = GetContainerItemLink(bag, slot)
-            
-            if itemLink then
-                -- Extract item name from link
-                local itemName = GetItemNameFromLink(itemLink)
-                
-                -- Check if this is an item we're tracking
-                if itemName and trackedItemLookup[itemName] then
-                    -- Track location
-                    if not itemLocations[itemName] then
-                        itemLocations[itemName] = {}
-                    end
-                    
-                    local location = {bag = bag, slot = slot}
-                    table.insert(itemLocations[itemName], location)
-                    
-                    -- If not in combat, update cooldown for newly found items
-                    if not playerInCombat and previouslyMissing[itemName] then
-                        UpdateItemCooldown(itemName, location)
-                    end
-                end
-            end
-        end
-    end
-    
-    -- Update missing item states
-    for itemName in pairs(trackedItemLookup) do
-        local isMissing = not itemLocations[itemName] or table.getn(itemLocations[itemName]) == 0
-        itemMissingFromBags[itemName] = isMissing
-        UpdateItemState(itemName, isMissing)
-    end
-    
-    -- Force a full cooldown update after scanning if not in combat
-    if not playerInCombat then
-        needsUpdate = true
-    end
-end
-
--- IMPROVED: Combat-safe verification function that only checks existing locations
-local function VerifyTrackedItemsInCombat()
-    for itemName, locations in pairs(itemLocations) do
-        if locations and table.getn(locations) > 0 then
-            local validLocations = {}
-            local stillValid = false
-            
-            -- Check each known location
-            for _, location in ipairs(locations) do
-                local link = GetContainerItemLink(location.bag, location.slot)
-                local nameInSlot = link and GetItemNameFromLink(link)
-                
-                if nameInSlot and nameInSlot == itemName then
-                    table.insert(validLocations, location)
-                    stillValid = true
-                end
-            end
-            
-            -- Update the locations table with only valid locations
-            itemLocations[itemName] = validLocations
-            
-            -- If no valid locations remain, mark as missing
-            if not stillValid then
-                itemMissingFromBags[itemName] = true
-                UpdateItemState(itemName, true)
-            end
-        end
-    end
-end
-
--- Function to initialize all tracking icons at once
-local function InitializeIcons()
-    local iconCount = 0
-    wipe(trackingFrames)
-    trackedSpellCount = 0
-    trackedItemCount = 0
-    
-    -- Get spell and item tables from settings file
-    local spellsToTrack, _ = GetCooldownTrackerSettings()
-    
-    -- 1. Initialize Spell Icons
-    -- Pre-process spell names to lowercase for faster comparison later
-    local spellsToTrackLower = {}
-    for i, spellName in ipairs(spellsToTrack) do
-        spellsToTrackLower[i] = string.lower(spellName)
-    end
-    
-    for i, spellName in ipairs(spellsToTrack) do
-        -- Find spell in spellbook if not already cached
-        if not CooldownTrackerDB.spellCache[spellName] then
-            CooldownTrackerDB.spellCache[spellName] = FindSpellInfo(spellName)
-        end
-        
-        local spellInfo = CooldownTrackerDB.spellCache[spellName]
-        
-        if spellInfo and spellInfo.texture then
-            iconCount = iconCount + 1
-            
-            -- Create tracking frame for this spell
-            trackingFrames[spellName] = CreateTrackingFrame(
-                spellName,
-                spellInfo.texture,
-                iconCount,
-                true,  -- isSpell
-                spellInfo.offset
-            )
-            
-            trackedSpellCount = trackedSpellCount + 1
-        end
-    end
-    
-    -- 2. Initialize Item Icons and Lookup Table
-    InitializeTrackedItemLookup()
-    iconCount = InitializeItemFrames(iconCount)
-    
-    return iconCount
-end
-
--- Optimization to avoid repeated GetTime() calls
-local currentTime = 0
-
--- IMPROVED: Function to update item cooldowns - more efficient batch processing
-local function UpdateItemCooldowns()
-    -- Update cooldowns for each tracked item with known locations
-    for itemName, locations in pairs(itemLocations) do
-        if locations and table.getn(locations) > 0 then
-            -- Take the first instance for cooldown info (all instances of same item share cooldown)
-            local location = locations[1]
-            UpdateItemCooldown(itemName, location)
-        end
-    end
-end
-
--- Efficient function to update all cooldowns at once
+---
+-- Updates all cooldowns for spells and items
+-- Only performs updates when needsUpdate flag is set
 local function UpdateAllCooldowns()
     if not needsUpdate then return end
     
@@ -482,7 +564,7 @@ local function UpdateAllCooldowns()
     
     -- Update spell cooldowns
     for id, frameData in pairs(trackingFrames) do
-        if frameData.isSpell then
+        if frameData.isSpell and frameData.spellOffset then
             -- Update spell cooldowns
             local startTime, duration, enable = GetSpellCooldown(frameData.spellOffset, BOOKTYPE_SPELL)
             
@@ -510,8 +592,430 @@ local function UpdateAllCooldowns()
     needsUpdate = false
 end
 
--- Utility function to add item to track
+---
+-- OnUpdate handler with configurable update interval
+-- Throttles updates based on the configured interval
+local function OnUpdate()
+    currentTime = GetTime()
+    
+    -- Check if enough time has passed according to config
+    if currentTime - lastUpdate >= CooldownTrackerDB.config.updateInterval then
+        UpdateAllCooldowns()
+        lastUpdate = currentTime
+    end
+end
+
+-- **************************************************************************
+-- TIMER MODULE INTEGRATION
+-- **************************************************************************
+
+--- Loads the CooldownTrackerTimers module
+local function LoadTimersModule()
+    -- In WoW 1.12, modules are typically loaded via the TOC file
+    -- and their functions are accessed through global variables
+    if CooldownTrackerTimers then
+        CooldownTrackerTimers:Initialize()
+    end
+end
+
+-- **************************************************************************
+-- INITIALIZATION FUNCTIONS
+-- **************************************************************************
+
+---
+-- Initializes tracking frames for items
+-- @param startIconCount The starting icon count for positioning
+-- @return The updated icon count
+local function InitializeItemFrames(startIconCount)
+    if not startIconCount or type(startIconCount) ~= "number" then
+        startIconCount = 0
+    end
+    
+    local iconCount = startIconCount
+    
+    -- Get the itemsToTrack table from the settings file
+    local _, itemsToTrack = GetCooldownTrackerSettings()
+    
+    -- Create frames for items with icons
+    for itemName, iconTexture in pairs(itemsToTrack) do
+        if not trackingFrames[itemName] then
+            iconCount = iconCount + 1
+            
+            -- Create tracking frame for this item
+            local frameData = CreateTrackingFrame(
+                itemName,
+                iconTexture,
+                iconCount,
+                false,  -- Not a spell
+                nil     -- No spell offset
+            )
+            
+            if frameData then
+                trackingFrames[itemName] = frameData
+                trackedItemCount = trackedItemCount + 1
+            end
+        end
+    end
+    
+    return iconCount
+end
+
+---
+-- Initializes all tracking icons for spells and items
+-- Updates existing frames and creates new ones as needed
+-- @return The total number of icons created/updated
+local function InitializeIcons()
+    -- Reset counters but preserve existing frames
+    trackedSpellCount = 0
+    trackedItemCount = 0
+    
+    -- Get highest current icon count for positioning new icons
+    local iconCount = 0
+    for _ in pairs(trackingFrames) do
+        iconCount = iconCount + 1
+    end
+    
+    -- Track which frames we've processed to detect and remove orphaned frames
+    local processedFrames = {}
+    
+    -- Get spell and item tables from settings file
+    local spellsToTrack, itemsToTrack = GetCooldownTrackerSettings()
+    
+    -- 1. Initialize/Update Spell Icons
+    for i, spellName in ipairs(spellsToTrack) do
+        if spellName and spellName ~= "" then
+            processedFrames[spellName] = true
+            
+            -- Update or create spell info if needed
+            local spellInfo
+            if not CooldownTrackerDB.spellCache[spellName] then
+                -- Find and cache new spell
+                spellInfo = FindSpellInfo(spellName)
+                if spellInfo then
+                    CooldownTrackerDB.spellCache[spellName] = spellInfo
+                end
+            else
+                -- Use existing cached info
+                spellInfo = CooldownTrackerDB.spellCache[spellName]
+            end
+            
+            if spellInfo and spellInfo.texture then
+                if trackingFrames[spellName] then
+                    -- Update existing frame if needed
+                    local frameData = trackingFrames[spellName]
+                    
+                    -- Update spell offset if it changed
+                    if frameData.spellOffset ~= spellInfo.offset then
+                        frameData.spellOffset = spellInfo.offset
+                    end
+                    
+                    -- Update texture if it changed
+                    if frameData.icon:GetTexture() ~= spellInfo.texture then
+                        frameData.icon:SetTexture(spellInfo.texture)
+                    end
+                else
+                    -- Create new frame for this spell
+                    iconCount = iconCount + 1
+                    local frameData = CreateTrackingFrame(
+                        spellName,
+                        spellInfo.texture,
+                        iconCount,
+                        true,  -- isSpell
+                        spellInfo.offset
+                    )
+                    
+                    if frameData then
+                        trackingFrames[spellName] = frameData
+                    end
+                end
+                
+                trackedSpellCount = trackedSpellCount + 1
+            end
+        end
+    end
+    
+    -- 2. Initialize Item Icons and Lookup Table
+    InitializeTrackedItemLookup()
+    
+    -- Process all items
+    for itemName, iconTexture in pairs(itemsToTrack) do
+        if itemName and itemName ~= "" then
+            processedFrames[itemName] = true
+            
+            if not trackingFrames[itemName] then
+                -- Create new frame for this item
+                iconCount = iconCount + 1
+                local frameData = CreateTrackingFrame(
+                    itemName,
+                    iconTexture,
+                    iconCount,
+                    false,  -- Not a spell
+                    nil     -- No spell offset
+                )
+                
+                if frameData then
+                    trackingFrames[itemName] = frameData
+                    trackedItemCount = trackedItemCount + 1
+                end
+            else
+                trackedItemCount = trackedItemCount + 1
+            end
+        end
+    end
+    
+    -- Remove any orphaned frames (items or spells that were removed from settings)
+    for name, frameData in pairs(trackingFrames) do
+        if not processedFrames[name] then
+            -- This frame is no longer in the settings, so remove it
+            frameData.frame:Hide()
+            frameData.frame:SetParent(nil)
+            trackingFrames[name] = nil
+        end
+    end
+    
+    return iconCount
+end
+
+-- **************************************************************************
+-- COMMAND HANDLING
+-- **************************************************************************
+
+---
+-- Finds an item in the player's bags by name
+-- @param itemName The name of the item to find
+-- @return Table with item information or nil if not found
+local function FindItemInBags(itemName)
+    if not itemName or itemName == "" then return nil end
+    
+    local lowerItemName = string.lower(itemName)
+    
+    -- Scan all bags
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag)
+        
+        for slot = 1, numSlots do
+            local itemLink = GetContainerItemLink(bag, slot)
+            
+            if itemLink then
+                -- Extract item name from link
+                local name = GetItemNameFromLink(itemLink)
+                
+                if name and string.lower(name) == lowerItemName then
+                    -- Found the item, get texture
+                    local texture = GetContainerItemInfo(bag, slot)
+                    
+                    return {
+                        name = name, -- Return actual case from the item
+                        texture = texture,
+                        bag = bag,
+                        slot = slot
+                    }
+                end
+            end
+        end
+    end
+    
+    return nil
+end
+
+---
+-- Adds a spell or item to track
+-- @param name The name of the spell or item to add
+local function AddCommand(name)
+    if not name or name == "" then
+        PrintMessage("Invalid name. Use /cdt add <spell or item name>", COLOR_ERROR)
+        return
+    end
+    
+    -- Get the list of spells and items being tracked
+    local spellsToTrack, itemsToTrack = GetCooldownTrackerSettings()
+    
+    -- 1. First check if we're already tracking this spell or item
+    -- Check spells (using lowercase comparison for case-insensitive matching)
+    local lowerName = string.lower(name)
+    local alreadyTrackingSpell = false
+    for _, spellName in ipairs(spellsToTrack) do
+        if string.lower(spellName) == lowerName then
+            alreadyTrackingSpell = true
+            PrintMessage("Already tracking spell: "..spellName, COLOR_WARNING)
+            return
+        end
+    end
+    
+    -- Check items (using lowercase comparison for case-insensitive matching)
+    for itemName, _ in pairs(itemsToTrack) do
+        if string.lower(itemName) == lowerName then
+            PrintMessage("Already tracking item: "..itemName, COLOR_WARNING)
+            return
+        end
+    end
+    
+    -- 2. Try to find it as a spell
+    local spellInfo = FindSpellInfo(name)
+    
+    if spellInfo then
+        -- Add to spells list
+        table.insert(spellsToTrack, name)
+        CooldownTrackerDB.spellCache[name] = spellInfo
+        
+        -- Create the tracking frame
+        local iconCount = 0
+        for _ in pairs(trackingFrames) do iconCount = iconCount + 1 end
+        local frameData = CreateTrackingFrame(
+            name,
+            spellInfo.texture,
+            iconCount + 1,
+            true,  -- isSpell
+            spellInfo.offset
+        )
+        
+        if frameData then
+            trackingFrames[name] = frameData
+            trackedSpellCount = trackedSpellCount + 1
+            needsUpdate = true
+            
+            PrintMessage("Added spell "..name, COLOR_SUCCESS)
+        end
+        return
+    end
+    
+    -- 3. Try to find it as an item
+    local itemInfo = FindItemInBags(name)
+    
+    if itemInfo then
+        -- Add to items list
+        itemsToTrack[itemInfo.name] = itemInfo.texture
+        
+        -- Update tracked item lookup
+        trackedItemLookup[itemInfo.name] = true
+        
+        -- Create the tracking frame
+        local iconCount = 0
+        for _ in pairs(trackingFrames) do iconCount = iconCount + 1 end
+        local frameData = CreateTrackingFrame(
+            itemInfo.name,
+            itemInfo.texture,
+            iconCount + 1,
+            false,  -- Not a spell
+            nil     -- No spell offset
+        )
+        
+        if frameData then
+            trackingFrames[itemInfo.name] = frameData
+            trackedItemCount = trackedItemCount + 1
+            
+            -- Scan bags to find all instances of this item
+            ScanBagsForItems()
+            
+            PrintMessage("Added item "..itemInfo.name, COLOR_SUCCESS)
+        end
+        return
+    end
+    
+    -- 4. Not found as either spell or item
+    PrintMessage("Could not find '"..name.."' in your spellbook or bags.", COLOR_ERROR)
+end
+
+---
+-- Removes a spell or item from tracking
+-- @param name The name of the spell or item to remove
+local function RemoveCommand(name)
+    if not name or name == "" then
+        PrintMessage("Invalid name. Use /cdt remove <spell or item name>", COLOR_ERROR)
+        return
+    end
+    
+    -- Get the list of spells and items being tracked
+    local spellsToTrack, itemsToTrack = GetCooldownTrackerSettings()
+    
+    -- 1. Try to remove from spell list
+    local lowerName = string.lower(name)
+    local spellFound = false
+    local spellIndex = nil
+    local actualSpellName = nil
+    
+    for i, spellName in ipairs(spellsToTrack) do
+        if spellName and string.lower(spellName) == lowerName then
+            spellIndex = i
+            spellFound = true
+            actualSpellName = spellName
+            break
+        end
+    end
+    
+    if spellFound then
+        -- Remove the spell from the list
+        table.remove(spellsToTrack, spellIndex)
+        
+        -- Remove from DB cache if exists
+        if CooldownTrackerDB.spellCache[actualSpellName] then
+            CooldownTrackerDB.spellCache[actualSpellName] = nil
+        end
+        
+        -- Hide and remove the tracking frame
+        if trackingFrames[actualSpellName] then
+            trackingFrames[actualSpellName].frame:Hide()
+            trackingFrames[actualSpellName].frame:SetParent(nil)
+            trackingFrames[actualSpellName] = nil
+        end
+        
+        -- Update counter
+        if trackedSpellCount > 0 then
+            trackedSpellCount = trackedSpellCount - 1
+        end
+        
+        PrintMessage("Removed spell "..actualSpellName, COLOR_SUCCESS)
+        return
+    end
+    
+    -- 2. Try to remove from item list
+    local itemFound = false
+    local actualItemName = nil
+    
+    for itemName, _ in pairs(itemsToTrack) do
+        if itemName and string.lower(itemName) == lowerName then
+            itemFound = true
+            actualItemName = itemName
+            break
+        end
+    end
+    
+    if itemFound then
+        -- Remove the item from the table
+        itemsToTrack[actualItemName] = nil
+        
+        -- Remove from tracked item lookup
+        trackedItemLookup[actualItemName] = nil
+        
+        -- Hide and remove the tracking frame
+        if trackingFrames[actualItemName] then
+            trackingFrames[actualItemName].frame:Hide()
+            trackingFrames[actualItemName].frame:SetParent(nil)
+            trackingFrames[actualItemName] = nil
+        end
+        
+        -- Update counter
+        if trackedItemCount > 0 then
+            trackedItemCount = trackedItemCount - 1
+        end
+        
+        PrintMessage("Removed item "..actualItemName, COLOR_SUCCESS)
+        return
+    end
+    
+    -- 3. Not found in either list
+    PrintMessage("'"..name.."' not found in tracked spells or items.", COLOR_ERROR)
+end
+
+---
+-- Adds an item to track with default settings
+-- @param itemName The name of the item to track
+-- @return Boolean indicating success or failure
 local function AddItemToTrack(itemName)
+    if not itemName or itemName == "" then
+        return false
+    end
+    
     -- Get the itemsToTrack table from the settings file
     local _, itemsToTrack = GetCooldownTrackerSettings()
 
@@ -534,14 +1038,20 @@ local function AddItemToTrack(itemName)
     
     -- Create tracking frame if not exists
     if not trackingFrames[itemName] then
-        trackingFrames[itemName] = CreateTrackingFrame(
+        local frameData = CreateTrackingFrame(
             itemName,
             itemsToTrack[itemName],
             iconCount + 1,
             false,  -- Not a spell
             nil     -- No spell offset
         )
-        trackedItemCount = trackedItemCount + 1
+        
+        if frameData then
+            trackingFrames[itemName] = frameData
+            trackedItemCount = trackedItemCount + 1
+        else
+            return false
+        end
     end
     
     -- Rescan bags to find this item
@@ -551,22 +1061,62 @@ local function AddItemToTrack(itemName)
     return not itemMissingFromBags[itemName]
 end
 
--- Slash command handler - optimized to reduce string operations
+---
+-- Resizes a specific icon to a new size
+-- @param frameData The frame data for the icon
+-- @param newSize The new size to set
+-- @return Boolean indicating success or failure
+local function ResizeIcon(frameData, newSize)
+    if not frameData or not newSize or newSize < MIN_ICON_SIZE or newSize > MAX_ICON_SIZE then
+        return false
+    end
+    
+    -- Set the width and height
+    frameData.frame:SetWidth(newSize)
+    frameData.frame:SetHeight(newSize)
+    
+    -- Calculate and apply the new cooldown scale
+    local cooldownScale = CalculateCooldownScale(newSize)
+    frameData.cooldown:SetScale(cooldownScale)
+    
+    -- Reposition the cooldown
+    frameData.cooldown:ClearAllPoints()
+    frameData.cooldown:SetPoint("TOPLEFT", frameData.frame, "TOPLEFT")
+    frameData.cooldown:SetPoint("BOTTOMRIGHT", frameData.frame, "BOTTOMRIGHT")
+    
+    -- Save the individual size
+    CooldownTrackerDB.individualIconSizes[frameData.name] = newSize
+    
+    return true
+end
+
+---
+-- Handles slash commands for the addon
+-- @param msg The message after the slash command
 local function SlashCommand(msg)
     if not msg or msg == "" then
-        DEFAULT_CHAT_FRAME:AddMessage(addonName.." Commands:", 1, 1, 0)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt lock - Toggle frame locking", 1, 1, 1)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <number> - Set icon size (10-100)", 1, 1, 1)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt alpha <number> - Set icon transparency (0.1-1.0)", 1, 1, 1)
+        DEFAULT_CHAT_FRAME:AddMessage(addonName.." Commands:", COLOR_TITLE.r, COLOR_TITLE.g, COLOR_TITLE.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt lock - Toggle frame locking", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <number> - Set all icons size (10-100)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <spell or item name> <number> - Set specific icon size (10-100)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt alpha <number> - Set icon transparency (0.1-1.0)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt add <spell or item name> - Add a spell or item to track", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt remove <spell or item name> - Remove a spell or item from tracking", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt list - List all spells and items currently being tracked", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt timers - Toggle timer text display on cooldown icons", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
         return
     end
     
-    -- Split the command into parts
-    local cmd, value = CustomStrSplit(msg)
-    local config = CooldownTrackerDB.config
+    -- Get all arguments from the message
+    local parts = {}
+    local i = 1
+    for str in string.gfind(msg, "([^%s]+)") do
+        parts[i] = str
+        i = i + 1
+    end
     
-    -- Convert value to number if possible
-    local numValue = tonumber(value)
+    local cmd = parts[1]
+    local config = CooldownTrackerDB.config
     
     if cmd == "lock" then
         config.locked = not config.locked
@@ -576,72 +1126,173 @@ local function SlashCommand(msg)
             frameData.frame:EnableMouse(not config.locked)
         end
         
-        DEFAULT_CHAT_FRAME:AddMessage(addonName..": Frames "..(config.locked and "locked" or "unlocked"), config.locked and 0 or 1, config.locked and 1 or 0, 0)
+        PrintMessage("Frames "..(config.locked and "locked" or "unlocked"), config.locked and COLOR_SUCCESS or COLOR_WARNING)
     
-    elseif cmd == "size" and numValue then
-        if numValue >= 10 and numValue <= 100 then
-            config.iconSize = numValue
-            CacheFrequentValues() -- Update cached values
+    elseif cmd == "size" then
+        -- Individual icon size: /cdt size <name> <size>
+        if parts[2] and parts[3] then
+            -- Check if the last part is a number (size value)
+            local lastPart = parts[table.getn(parts)]
+            local sizeValue = tonumber(lastPart)
             
-            -- Resize all frames at once
-            for _, frameData in pairs(trackingFrames) do
-                frameData.frame:SetWidth(numValue)
-                frameData.frame:SetHeight(numValue)
-                
-                -- Adjust cooldown frame scaling and positioning
-                frameData.cooldown:SetScale(config.cooldownScale)
-                
-                frameData.cooldown:ClearAllPoints()
-                frameData.cooldown:SetPoint("TOPLEFT", frameData.frame, "TOPLEFT")
-                frameData.cooldown:SetPoint("BOTTOMRIGHT", frameData.frame, "BOTTOMRIGHT")
+            if not sizeValue or sizeValue < MIN_ICON_SIZE or sizeValue > MAX_ICON_SIZE then
+                PrintMessage("Invalid size. Use a number between "..MIN_ICON_SIZE.." and "..MAX_ICON_SIZE, COLOR_ERROR)
+                return
             end
             
-            DEFAULT_CHAT_FRAME:AddMessage(addonName..": Icon size set to "..numValue, 0, 1, 1)
+            -- Combine all parts between the command and the size as the icon name
+            local iconName = parts[2]
+            for i = 3, table.getn(parts) - 1 do
+                iconName = iconName .. " " .. parts[i]
+            end
+            
+            -- Find the frame data for this icon
+            local found = false
+            for name, frameData in pairs(trackingFrames) do
+                if string.lower(name) == string.lower(iconName) then
+                    found = true
+                    if ResizeIcon(frameData, sizeValue) then
+                        PrintMessage("Set "..name.." size to "..sizeValue, COLOR_INFO)
+                    else
+                        PrintMessage("Failed to resize "..name, COLOR_ERROR)
+                    end
+                    break
+                end
+            end
+            
+            if not found then
+                PrintMessage("Icon '"..iconName.."' not found", COLOR_ERROR)
+            end
+        
+        -- Global resize: /cdt size <size>
+        elseif parts[2] then
+            local sizeValue = tonumber(parts[2])
+            
+            if not sizeValue or sizeValue < MIN_ICON_SIZE or sizeValue > MAX_ICON_SIZE then
+                PrintMessage("Invalid size. Use a number between "..MIN_ICON_SIZE.." and "..MAX_ICON_SIZE, COLOR_ERROR)
+                return
+            end
+            
+            config.iconSize = sizeValue
+            UpdateCachedValues() -- Update cached values
+            
+            -- Resize all frames that don't have individual sizes
+            for name, frameData in pairs(trackingFrames) do
+                if not CooldownTrackerDB.individualIconSizes[name] then
+                    frameData.frame:SetWidth(sizeValue)
+                    frameData.frame:SetHeight(sizeValue)
+                    
+                    -- Adjust cooldown frame scaling and positioning
+                    frameData.cooldown:SetScale(config.cooldownScale)
+                    
+                    frameData.cooldown:ClearAllPoints()
+                    frameData.cooldown:SetPoint("TOPLEFT", frameData.frame, "TOPLEFT")
+                    frameData.cooldown:SetPoint("BOTTOMRIGHT", frameData.frame, "BOTTOMRIGHT")
+                end
+            end
+            
+            PrintMessage("Default icon size set to "..sizeValue, COLOR_INFO)
         else
-            DEFAULT_CHAT_FRAME:AddMessage(addonName..": Invalid size. Use /cdt size <number> between 10 and 100", 1, 0, 0)
+            PrintMessage("Invalid size command. Use /cdt size <number> or /cdt size <name> <number>", COLOR_ERROR)
         end
     
-    elseif cmd == "alpha" and numValue then
-        if numValue >= 0.1 and numValue <= 1.0 then
-            config.iconAlpha = numValue
+    elseif cmd == "alpha" and parts[2] then
+        local alphaValue = tonumber(parts[2])
+        if alphaValue and alphaValue >= MIN_ICON_ALPHA and alphaValue <= MAX_ICON_ALPHA then
+            config.iconAlpha = alphaValue
             
             -- Update all frames at once
             for _, frameData in pairs(trackingFrames) do
-                frameData.frame:SetAlpha(numValue)
+                frameData.frame:SetAlpha(alphaValue)
+                frameData.originalAlpha = alphaValue
             end
             
-            DEFAULT_CHAT_FRAME:AddMessage(addonName..": Icon alpha set to "..numValue, 0, 1, 1)
+            PrintMessage("Icon alpha set to "..alphaValue, COLOR_INFO)
         else
-            DEFAULT_CHAT_FRAME:AddMessage(addonName..": Invalid alpha. Use /cdt alpha <number> between 0.1 and 1.0", 1, 0, 0)
+            PrintMessage("Invalid alpha. Use /cdt alpha <number> between "..MIN_ICON_ALPHA.." and "..MAX_ICON_ALPHA, COLOR_ERROR)
         end
+    
+    elseif cmd == "add" and parts[2] then
+        -- Combine all remaining parts for the name
+        local nameToAdd = parts[2]
+        for i = 3, table.getn(parts) do
+            nameToAdd = nameToAdd .. " " .. parts[i]
+        end
+        
+        -- Call the Add command handler
+        AddCommand(nameToAdd)
+    
+    elseif cmd == "remove" and parts[2] then
+        -- Combine all remaining parts for the name
+        local nameToRemove = parts[2]
+        for i = 3, table.getn(parts) do
+            nameToRemove = nameToRemove .. " " .. parts[i]
+        end
+        
+        -- Call the Remove command handler
+        RemoveCommand(nameToRemove)
+    
+    elseif cmd == "timers" then
+        if CooldownTrackerTimers then
+            local enabled = CooldownTrackerTimers:ToggleTimerText()
+            PrintMessage("Timer text display " .. (enabled and "enabled" or "disabled"), enabled and COLOR_SUCCESS or COLOR_INFO)
+        else
+            PrintMessage("Timer module not loaded", COLOR_ERROR)
+        end
+    
+    elseif cmd == "list" then
+        -- Get the list of spells and items being tracked
+        local spellsToTrack, itemsToTrack = GetCooldownTrackerSettings()
+        
+        -- Print header
+        DEFAULT_CHAT_FRAME:AddMessage(addonName.." - Tracked Spells and Items:", COLOR_TITLE.r, COLOR_TITLE.g, COLOR_TITLE.b)
+        
+        -- Print spells
+        if table.getn(spellsToTrack) > 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("Spells:", COLOR_INFO.r, COLOR_INFO.g, COLOR_INFO.b)
+            for i, spellName in ipairs(spellsToTrack) do
+                DEFAULT_CHAT_FRAME:AddMessage("  "..i..". "..spellName, COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+            end
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("No spells being tracked.", COLOR_WARNING.r, COLOR_WARNING.g, COLOR_WARNING.b)
+        end
+        
+        -- Print items
+        local itemCount = 0
+        for _ in pairs(itemsToTrack) do itemCount = itemCount + 1 end
+        
+        if itemCount > 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("Items:", COLOR_INFO.r, COLOR_INFO.g, COLOR_INFO.b)
+            local index = 1
+            for itemName, _ in pairs(itemsToTrack) do
+                local status = itemMissingFromBags[itemName] and " (missing)" or ""
+                DEFAULT_CHAT_FRAME:AddMessage("  "..index..". "..itemName..status, COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+                index = index + 1
+            end
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("No items being tracked.", COLOR_WARNING.r, COLOR_WARNING.g, COLOR_WARNING.b)
+        end
+        
+        -- Print summary
+        DEFAULT_CHAT_FRAME:AddMessage("Total: "..trackedSpellCount.." spell(s) and "..trackedItemCount.." item(s)", COLOR_SUCCESS.r, COLOR_SUCCESS.g, COLOR_SUCCESS.b)
     
     else
         -- Show help message for any unrecognized command
-        DEFAULT_CHAT_FRAME:AddMessage(addonName.." Commands:", 1, 1, 0)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt lock - Toggle frame locking", 1, 1, 1)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <number> - Set icon size (10-100)", 1, 1, 1)
-        DEFAULT_CHAT_FRAME:AddMessage("/cdt alpha <number> - Set icon transparency (0.1-1.0)", 1, 1, 1)
+        DEFAULT_CHAT_FRAME:AddMessage(addonName.." Commands:", COLOR_TITLE.r, COLOR_TITLE.g, COLOR_TITLE.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt lock - Toggle frame locking", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <number> - Set all icons size (10-100)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt size <spell or item name> <number> - Set specific icon size (10-100)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt alpha <number> - Set icon transparency (0.1-1.0)", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt add <spell or item name> - Add a spell or item to track", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
+        DEFAULT_CHAT_FRAME:AddMessage("/cdt remove <spell or item name> - Remove a spell or item from tracking", COLOR_HELP.r, COLOR_HELP.g, COLOR_HELP.b)
     end
 end
 
-local lastUpdate = 0
+-- **************************************************************************
+-- EVENT HANDLERS
+-- **************************************************************************
 
--- Optimized OnUpdate handler with configurable update interval
-local function OnUpdate()
-    currentTime = GetTime()
-    
-    -- Check if enough time has passed according to config
-    if currentTime - lastUpdate >= CooldownTrackerDB.config.updateInterval then
-        UpdateAllCooldowns()
-        lastUpdate = currentTime
-    end
-end
-
--- IMPROVED: Throttled event handler for BAG_UPDATE with combat awareness
-local bagUpdateThrottle = 0
-local bagUpdatePending = false
-
--- IMPROVED: Combat state tracking functions
+-- Combat state tracking functions
 local function OnPlayerEnterCombat()
     playerInCombat = true
 end
@@ -657,7 +1308,7 @@ local function OnPlayerLeaveCombat()
     end
 end
 
--- IMPROVED: BAG_UPDATE handler with combat awareness
+-- BAG_UPDATE handler with combat awareness
 local function OnBagUpdate()
     -- If in combat, only verify existing items
     if playerInCombat then
@@ -676,11 +1327,15 @@ local function OnBagUpdate()
     end
 end
 
--- In the OnEvent function, handle combat events and improve event handling
+---
+-- Main event handler for all registered events
 local function OnEvent()
     if event == "VARIABLES_LOADED" then
         -- Initialize the database
-        InitDB()
+        InitializeDatabase()
+        
+        -- Load the timers module
+        LoadTimersModule()
         
         -- Register for PLAYER_ENTERING_WORLD to ensure spellbook is loaded
         frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -696,7 +1351,7 @@ local function OnEvent()
         frame:SetScript("OnUpdate", OnUpdate)
         
         -- Print initialization message
-        DEFAULT_CHAT_FRAME:AddMessage(addonName.." loaded. Tracking "..trackedSpellCount.." spell(s) and "..trackedItemCount.." item(s).", 0, 1, 0)
+        PrintMessage("Loaded. Tracking "..trackedSpellCount.." spell(s) and "..trackedItemCount.." item(s).", COLOR_SUCCESS)
         
         -- Register slash commands if not already done
         if not SlashCmdList["COOLDOWNTRACKER"] then
@@ -768,6 +1423,10 @@ local function OnEvent()
         end
     end
 end
+
+-- **************************************************************************
+-- INITIALIZATION AND SETUP
+-- **************************************************************************
 
 -- Register events
 frame:RegisterEvent("VARIABLES_LOADED")

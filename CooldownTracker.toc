@@ -8,5 +8,8 @@
 # Load settings file first
 CooldownTrackerSettings.lua
 
+# Load timers module
+CooldownTrackerTimers.lua
+
 # Load main addon
 CooldownTracker.lua
