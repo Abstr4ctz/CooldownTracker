@@ -1,7 +1,12 @@
 # CooldownTracker
 ![WoW 2025-03-07 15-34-05-451](https://github.com/user-attachments/assets/ecd3afeb-6486-45ca-ba3b-45438e9a8afa)
 
-### ⚠️ Edit CooldownTrackedSettings.lua to add and remove tracked spells and items! ⚠️
+### 📌 NEWEST UPDATE: <br>
+⚠️ You can now add spells and items directly in game + other options. Type `/cdt` to view all of them. ⚠️
+<br>
+<br>
+
+You can still edit CooldownTrackedSettings.lua to preload spells and items you want to track before first initialization. Istructions for that below:
 
 ## Description
 
